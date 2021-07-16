@@ -6,10 +6,42 @@ import (
 	"math"
 	"math/rand"
 	"net"
+
+	IP "github.com/google/netstack/tcpip"
+	Header "github.com/google/netstack/tcpip/header"
+	"github.com/songgao/packets/ethernet"
 )
 
+//   TCP Header Format
+
+//     0                   1                   2                   3
+//     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//    |          Source Port          |       Destination Port        |
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//    |                        Sequence Number                        |
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//    |                    Acknowledgment Number                      |
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//    |  Data |           |U|A|P|R|S|F|                               |
+//    | Offset| Reserved  |R|C|S|S|Y|I|            Window             |
+//    |       |           |G|K|H|T|N|N|                               |
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//    |           Checksum            |         Urgent Pointer        |
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//    |                    Options                    |    Padding    |
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//    |                             data                              |
+//    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+//                             TCP Header Format
+
+//           Note that one tick mark represents one bit position.
+
+//                                Figure 3.
+
 type TcpConnAddr struct {
-	SrcIP, DstIP     uint32
+	SrcIP, DstIP     IP.Address
 	SrcPort, DstPort uint16
 }
 
@@ -27,13 +59,46 @@ const (
 	TCP_CLOSING
 )
 
+//   Send Sequence Space
+
+//                    1         2          3          4
+//               ----------|----------|----------|----------
+//                      SND.UNA    SND.NXT    SND.UNA
+//                                           +SND.WND
+
+//         1 - old sequence numbers which have been acknowledged
+//         2 - sequence numbers of unacknowledged data
+//         3 - sequence numbers allowed for new data transmission
+//         4 - future sequence numbers which are not yet allowed
+
+type SendSpace struct {
+	una, nxt, wnd, iss uint
+}
+
+//   Receive Sequence Space
+
+//                        1          2          3
+//                    ----------|----------|----------
+//                           RCV.NXT    RCV.NXT
+//                                     +RCV.WND
+
+//         1 - old sequence numbers which have been acknowledged
+//         2 - sequence numbers allowed for new reception
+//         3 - future sequence numbers which are not yet allowed
+
+//                          Receive Sequence Space
+
+//                                Figure 5.
+
+type RecvSpace struct {
+	nxt, wnd, irs uint
+}
+
 type TcpConn struct {
 	Addr  TcpConnAddr
 	State byte
-}
-
-type tcpFlag struct {
-	SYN, FIN, ACK, RST bool
+	Send  SendSpace
+	Recv  RecvSpace
 }
 
 func ip2int(ip net.IP) uint32 {
@@ -48,88 +113,23 @@ func int2ip(nn uint32) net.IP {
 	binary.BigEndian.PutUint32(ip, nn)
 	return ip
 }
-func (t tcpFlag) String() string {
-	res := ""
-	if t.SYN {
-		res += "SYN "
-	}
-	if t.FIN {
-		res += "FIN "
-	}
-	if t.ACK {
-		res += "ACK "
-	}
-	if t.RST {
-		res += "RST "
-	}
-	return res
-}
 
-const (
-	TCPHeaderSize = 20
-	IPHeaderSize  = 20
-)
-
-type tCPHeader struct {
-	SrcPort, DstPort uint16
-	Seq              uint32
-	Ack              uint32
-	HeaderLen        uint8
-	Flags            tcpFlag
-	Win              uint16
-	Checksum         uint16
-	Urgent           uint16
-}
-
-type TCPpak struct {
-	Header tCPHeader
-	Data   []byte
-}
-
-func (t *TCPpak) ToBytes() []byte {
-	res := make([]byte, 10)
-	return res
-}
-
-func ParseTcpPak(data []byte) *TCPpak {
-	r := TCPpak{}
-	r.Header.SrcPort = binary.BigEndian.Uint16(data[:2])
-	r.Header.DstPort = binary.BigEndian.Uint16(data[2:4])
-	r.Header.Seq = binary.BigEndian.Uint32(data[4:8])
-	r.Header.Ack = binary.BigEndian.Uint32(data[8:12])
-	r.Header.HeaderLen = (data[12] & 0xf0) >> 4
-	flag := data[13]
-	if flag&0x01 != 0 {
-		r.Header.Flags.FIN = true
-	}
-	if flag&0x02 != 0 {
-		r.Header.Flags.SYN = true
-	}
-	if flag&0x04 != 0 {
-		r.Header.Flags.RST = true
-	}
-	if flag&0x10 != 0 {
-		r.Header.Flags.ACK = true
-	}
-	r.Header.Win = binary.BigEndian.Uint16(data[14:16])
-	r.Header.Checksum = binary.BigEndian.Uint16(data[16:18])
-	r.Header.Urgent = binary.BigEndian.Uint16(data[18:20])
-	r.Data = data[20:]
-	return &r
-}
-
-func (t TcpConn) Process(pak *TCPpak) {
+func (t *TcpConn) Process(frame *ethernet.Frame, iph *Header.IPv4, tcph *Header.TCP) {
+	fmt.Printf("begin processing with state %v\n", t.State)
 	switch t.State {
 	case TCP_CLOSED:
-		if !pak.Header.Flags.SYN {
+		return
+	case TCP_LISTEN:
+		if tcph.Flags()&Header.TCPFlagSyn == 0 {
 			return
 		}
-		ack := TCPpak{}
-		ack.Header.Flags.ACK = true
-		ack.Header.Flags.SYN = true
-		ack.Header.Ack = pak.Header.Seq + 1
-		ack.Header.Seq = uint32(rand.Int31n(math.MaxInt32))
-		tcpBytes := ack.ToBytes()
+		ack := Header.TCPFields{}
+		ack.Flags |= Header.TCPFlagAck
+		ack.Flags |= Header.TCPFlagSyn
+		ack.AckNum = tcph.SequenceNumber() + 1
+		ack.SeqNum = uint32(rand.Int31n(math.MaxInt32))
+		fmt.Printf("ACK : %+v\n", ack)
+	default:
+		fmt.Println("unknown state")
 	}
-	fmt.Printf("%v : %v    %v : %v  %v  len : %v \n", int2ip(t.Addr.SrcIP), t.Addr.SrcPort, int2ip(t.Addr.DstIP), t.Addr.DstPort, pak.Header.Flags.String(), len(pak.Data)+TCPHeaderSize+IPHeaderSize)
 }
