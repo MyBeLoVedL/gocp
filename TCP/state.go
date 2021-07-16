@@ -1,15 +1,14 @@
 package tcp
 
 import (
-	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
-	"math/rand"
-	"net"
 
 	IP "github.com/google/netstack/tcpip"
 	Header "github.com/google/netstack/tcpip/header"
 	"github.com/songgao/packets/ethernet"
+	"github.com/songgao/water"
 )
 
 //   TCP Header Format
@@ -101,21 +100,73 @@ type TcpConn struct {
 	Recv  RecvSpace
 }
 
-func ip2int(ip net.IP) uint32 {
-	if len(ip) == 16 {
-		return binary.BigEndian.Uint32(ip[12:16])
+func hexView(data []byte) {
+	col := 0
+	for i := 0; i < len(data); i += 2 {
+		ch := hex.EncodeToString(data[i : i+2])
+		if col < 7 {
+			fmt.Printf("%s  ", ch)
+			col++
+		} else {
+			col = 0
+			fmt.Printf("%s\n", ch)
+		}
 	}
-	return binary.BigEndian.Uint32(ip)
+	println()
 }
 
-func int2ip(nn uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.BigEndian.PutUint32(ip, nn)
-	return ip
-}
+// func ip2int(ip net.IP) uint32 {
+// 	if len(ip) == 16 {
+// 		return binary.BigEndian.Uint32(ip[12:16])
+// 	}
+// 	return binary.BigEndian.Uint32(ip)
+// }
 
-func (t *TcpConn) Process(frame *ethernet.Frame, iph *Header.IPv4, tcph *Header.TCP) {
+// func int2ip(nn uint32) net.IP {
+// 	ip := make(net.IP, 4)
+// 	binary.BigEndian.PutUint32(ip, nn)
+// 	return ip
+// }
+
+func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *Header.IPv4, tcph *Header.TCP) {
 	fmt.Printf("begin processing with state %v\n", t.State)
+
+	sendAck := func(ack *Header.TCPFields) {
+		ack.SrcPort = tcph.DestinationPort()
+		ack.DstPort = tcph.SourcePort()
+		ack.DataOffset = Header.TCPMinimumSize
+		ack.WindowSize = uint16(t.Recv.wnd)
+		ack.Checksum = 0
+		ackRaw := Header.TCP(make([]byte, 26))
+		ackRaw.Encode(ack)
+		// ! recheck the checksum
+		partialChecksum := Header.PseudoHeaderChecksum(Header.TCPProtocolNumber, iph.SourceAddress(), iph.DestinationAddress(), uint16(len(ackRaw)))
+		ackRaw.SetChecksum(^Header.Checksum(ackRaw, partialChecksum))
+
+		ackIP := Header.IPv4Fields{}
+		ackIP.SrcAddr = iph.DestinationAddress()
+		ackIP.DstAddr = iph.SourceAddress()
+		ackIP.Checksum = 0
+		ackIP.Protocol = uint8(Header.TCPProtocolNumber)
+		ackIP.TTL = 128
+		ackIP.TotalLength = uint16(20 + len(ackRaw))
+		ackIP.IHL = 20
+		ackIPRaw := Header.IPv4(make([]byte, 20))
+		ackIPRaw.Encode(&ackIP)
+		ackIPRaw.SetChecksum(^(Header.Checksum(ackIPRaw, 0)))
+
+		frame := make([]byte, 14)
+		copy(frame[:6], frameRaw.Destination())
+		copy(frame[6:12], frameRaw.Source())
+		copy(frame[12:14], []byte{0x08, 0x00})
+
+		frame = append(frame, ackIPRaw...)
+		frame = append(frame, ackRaw...)
+		ifce.Write(frame)
+		// hexView(frame)
+		// fmt.Printf("write [%v] bytes %v\n", len(ackRaw), hex.EncodeToString(ackRaw))
+	}
+
 	switch t.State {
 	case TCP_CLOSED:
 		return
@@ -123,12 +174,26 @@ func (t *TcpConn) Process(frame *ethernet.Frame, iph *Header.IPv4, tcph *Header.
 		if tcph.Flags()&Header.TCPFlagSyn == 0 {
 			return
 		}
+
+		//* update send and receive state
+		t.Send.iss = 0
+		t.Send.una = t.Send.iss
+		t.Send.nxt = t.Send.una + 1
+		t.Send.wnd = math.MaxUint16
+
+		t.Recv.irs = uint(tcph.SequenceNumber())
+		t.Recv.nxt = t.Recv.irs + 1
+		t.Recv.wnd = uint(tcph.WindowSize())
+
+		t.State = TCP_SYN_RCVD
+
+		//* construct ACK packet
 		ack := Header.TCPFields{}
 		ack.Flags |= Header.TCPFlagAck
 		ack.Flags |= Header.TCPFlagSyn
-		ack.AckNum = tcph.SequenceNumber() + 1
-		ack.SeqNum = uint32(rand.Int31n(math.MaxInt32))
-		fmt.Printf("ACK : %+v\n", ack)
+		ack.AckNum = uint32(t.Recv.nxt)
+		ack.SeqNum = uint32(t.Send.iss)
+		sendAck(&ack)
 	default:
 		fmt.Println("unknown state")
 	}

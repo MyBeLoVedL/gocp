@@ -57,6 +57,6 @@ func main() {
 			conn = connections[addr]
 			conn.State = TCP_LISTEN
 		}
-		conn.Process(&frame, &iph, &tcph)
+		conn.Process(ifce, &frame, &iph, &tcph)
 	}
 }
