@@ -3,8 +3,6 @@ package main
 import (
 	. "tigo/TCP"
 
-	"fmt"
-
 	Header "github.com/google/netstack/tcpip/header"
 	"github.com/songgao/packets/ethernet"
 	"github.com/songgao/water"
@@ -27,7 +25,9 @@ func main() {
 	}
 	var frame ethernet.Frame
 	connections := make(map[TcpConnAddr]TcpConn)
-
+	listenings := make(map[uint16]struct{})
+	// * for debugging
+	listenings[80] = struct{}{}
 	for {
 		frame.Resize(1500)
 		n, err := ifce.Read([]byte(frame))
@@ -44,15 +44,14 @@ func main() {
 			continue
 		}
 		tcph := Header.TCP(iph.Payload())
-		// src := iph.SourceAddress().To4()
-		// fmt.Println(src)
-		fmt.Printf("Src : %v:%v    Dst : %v:%v \n", iph.SourceAddress(), tcph.SourcePort(), iph.DestinationAddress(), tcph.DestinationPort())
-
-		// tpak := ParseTcpPak(frame.Payload()[20:])
-		// fmt.Printf("frame : %v ip header %v tcp header %v\n", len(frame.Payload()), header.Len, tpak.Header.HeaderLen)
 		addr := TcpConnAddr{SrcIP: iph.SourceAddress(), SrcPort: tcph.SourcePort(), DstIP: iph.DestinationAddress(), DstPort: tcph.DestinationPort()}
 		conn, pre := connections[addr]
 		if !pre {
+			// * if no listening port,ignore it.
+			_, preInLi := listenings[tcph.DestinationPort()]
+			if !preInLi {
+				continue
+			}
 			connections[addr] = TcpConn{Addr: addr}
 			conn = connections[addr]
 			conn.State = TCP_LISTEN

@@ -129,7 +129,12 @@ func hexView(data []byte) {
 // }
 
 func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *Header.IPv4, tcph *Header.TCP) {
-	fmt.Printf("begin processing with state %v\n", t.State)
+	// fmt.Printf("begin processing with state %v\n", t.State)
+
+	// ! acceptable  ACK check
+	if !(tcph.AckNumber() > uint32(t.Send.una) && tcph.AckNumber() <= uint32(t.Send.nxt)) {
+		return
+	}
 
 	sendAck := func(ack *Header.TCPFields) {
 		ack.SrcPort = tcph.DestinationPort()
@@ -194,6 +199,34 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 		ack.AckNum = uint32(t.Recv.nxt)
 		ack.SeqNum = uint32(t.Send.iss)
 		sendAck(&ack)
+	case TCP_SYN_SENT:
+		if tcph.Flags()&Header.TCPFlagAck == 0 || tcph.AckNumber() != uint32(t.Recv.nxt) {
+			return
+		}
+		t.Send.una += 1
+		t.Send.wnd = uint(tcph.WindowSize())
+
+		t.Recv.irs = uint(tcph.SequenceNumber())
+		t.Recv.nxt = t.Recv.irs + 1
+		t.Recv.wnd = uint(tcph.WindowSize())
+
+		t.State = TCP_ESTABLISHED
+		ack := Header.TCPFields{}
+		ack.Flags |= Header.TCPFlagAck
+		ack.AckNum = uint32(t.Recv.nxt)
+		ack.SeqNum = uint32(t.Send.iss)
+		ack.WindowSize = uint16(t.Send.wnd)
+		sendAck(&ack)
+
+	case TCP_SYN_RCVD:
+		if tcph.Flags()&Header.TCPFlagAck == 0 || tcph.AckNumber() != uint32(t.Recv.nxt) {
+			return
+		}
+		t.Send.una += 1
+		t.Send.wnd = uint(tcph.WindowSize())
+
+		t.State = TCP_ESTABLISHED
+
 	default:
 		fmt.Println("unknown state")
 	}
