@@ -97,8 +97,7 @@ type RecvSpace struct {
 // \param n The input absolute 64-bit sequence number
 // \param isn The initial sequence number
 func wrap(n uint64, iss uint32) uint32 {
-	var n32 uint32
-	n32 = uint32((n << 32) >> 32)
+	n32 := uint32((n << 32) >> 32)
 	return n32 + iss
 }
 
@@ -112,61 +111,53 @@ func wrap(n uint64, iss uint32) uint32 {
 // runs from the local TCPSender to the remote TCPReceiver and has one ISN,
 // and the other stream runs from the remote TCPSender to the local TCPReceiver and
 // has a different ISN.
-func unwrap(n, isn uint32, checkpoint uint64) uint64 {
-	var half_gap uint64 = 1 << 31
-	var lower, upper uint64
-	if checkpoint <= half_gap {
-		lower = 0
-		upper = 2 * half_gap
-	} else {
-		lower = checkpoint - half_gap
-		upper = checkpoint + half_gap
-	}
+// #define interval (1ul << 32)
 
-	var base uint64 = (checkpoint >> 32) << 32
-	t := n - isn
-	base += uint64(t)
-	if !(base >= lower && base <= upper) {
-		base += half_gap * 2
+func abs(num int64) int64 {
+	if num < 0 {
+		return -num
 	}
-	if !(base >= lower && base <= upper) {
-		panic("exam failed")
+	return num
+}
+
+func min(a, b int64) int64 {
+	if a < b {
+		return a
 	}
-	return base
-#define interval (1ul << 32)
+	return b
+}
 
 //* a hard lesson about overflow
-uint64_t unwrap(WrappingInt32 n, WrappingInt32 isn, uint64_t checkpoint) {
-    auto n_raw = n.raw_value();
-    auto isn_raw = isn.raw_value();
-    uint32_t delta = n_raw >= isn_raw ? n_raw - isn_raw : UINT32_MAX + 1 - isn_raw + n_raw;
 
-    uint64_t base = (checkpoint >> 32) << 32;
+const interval = 1 << 32
 
-    auto a = ABS(int64_t(base - interval + delta - checkpoint));
-    auto b = ABS(int64_t(base + delta - checkpoint));
-    auto c = ABS(int64_t(base + interval + delta - checkpoint));
-    auto min = MIN(b, c);
-    if (int64_t(base - interval) >= 0)
-        min = MIN(a, min);
-    if (min == a && int64_t(base - interval) >= 0) {
-        return base - interval + delta;
-    } else if (min == b) {
-        return base + delta;
-    } else if (min == c) {
-        return base + interval + delta;
-    } else {
-        cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
-    }
-    return 0;
+func unwrap(n_raw, isn_raw uint32, checkpoint uint64) uint64 {
+	var delta uint64
+	if n_raw >= isn_raw {
+		delta = uint64(n_raw - isn_raw)
+	} else {
+		delta = uint64(math.MaxUint32 - isn_raw + n_raw + 1)
+	}
+
+	base := (checkpoint >> 32) << 32
+
+	var a = abs(int64(base - interval + delta - checkpoint))
+	var b = abs(int64(base + delta - checkpoint))
+	var c = abs(int64(base + interval + delta - checkpoint))
+	min_val := min(b, c)
+	if int64(base)-interval >= 0 {
+		min_val = min(a, min_val)
+	}
+	if min_val == a && int64(base-interval) >= 0 {
+		return base - interval + delta
+	} else if min_val == b {
+		return base + delta
+	} else if min_val == c {
+		return base + interval + delta
+	} else {
+		panic("unwrapping failed\n")
+	}
 }
-
-}
-
-
-
-
-
 
 type TcpConn struct {
 	Addr  TcpConnAddr
@@ -203,26 +194,46 @@ func hexView(data []byte) {
 // 	return ip
 // }
 
+// * SYN and FIN occupy space in order to protect the control information from been lost
+func tcpLen(tcph *Header.TCP) int {
+	length := 0
+	if tcph.Flags()&Header.TCPFlagSyn != 0 {
+		length += 1
+	}
+	if tcph.Flags()&Header.TCPFlagFin != 0 {
+		length += 1
+	}
+	return length + len(tcph.Payload())
+}
+
+func validateSegment(t *TcpConn, tcph *Header.TCP) bool {
+	seq := unwrap(tcph.SequenceNumber(), t.Recv.irs, t.Recv.nxt)
+	if t.Recv.wnd == 0 {
+		return tcpLen(tcph) == 0 && seq == t.Recv.nxt
+	} else {
+		if tcpLen(tcph) == 0 {
+			return seq >= t.Recv.nxt && seq < t.Recv.nxt+uint64(t.Recv.wnd)
+		} else {
+			end := seq + uint64(tcpLen(tcph)) - 1
+			return (seq >= t.Recv.nxt && seq < t.Recv.nxt+uint64(t.Recv.wnd)) ||
+				(end >= t.Recv.nxt && end < t.Recv.nxt+uint64(t.Recv.wnd))
+		}
+	}
+}
+
 func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *Header.IPv4, tcph *Header.TCP) {
 	// fmt.Printf("begin processing with state %v\n", t.State)
 
-	// ! acceptable  ACK check , logically : una < ACK <= nxt
+	// ! check if seq is within the receive window
+	if !validateSegment(t, tcph) {
+		return
+	}
 
+	// ! If this is an ACK packet,check if it ACK something valid , logically : una < ACK <= nxt
 	if tcph.Flags()&Header.TCPFlagAck != 0 {
-		ackn := tcph.AckNumber()
-		//* No data sent,only accept ACK which equals to nxt.
-		if !(t.Send.nxt == t.Send.una && t.Send.nxt == uint(ackn)) {
+		ackno := unwrap(tcph.AckNumber(), t.Recv.irs, t.Recv.nxt)
+		if !(ackno > t.Send.una && ackno <= t.Send.una+t.Send.nxt) {
 			return
-			//* no wrapping
-		} else if t.Send.nxt > t.Send.una {
-			if !(ackn > uint32(t.Send.una) && ackn <= uint32(t.Send.nxt)) {
-				return
-			}
-			// * wrapping
-		} else {
-			if !(ackn > uint32(t.Send.una) || ackn <= uint32(t.Send.nxt)) {
-				return
-			}
 		}
 	}
 
@@ -240,6 +251,7 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 
 		ackIP := Header.IPv4Fields{}
 		ackIP.SrcAddr = iph.DestinationAddress()
+
 		ackIP.DstAddr = iph.SourceAddress()
 		ackIP.Checksum = 0
 		ackIP.Protocol = uint8(Header.TCPProtocolNumber)
@@ -261,24 +273,39 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 		// hexView(frame)
 		// fmt.Printf("write [%v] bytes %v\n", len(ackRaw), hex.EncodeToString(ackRaw))
 	}
+
+	// ! Why 3-way handshake ?
+	// * 1 : exchange initial sequence number
+	// * 2 : prevent obselete connection
 	println("HI\n")
 	switch t.State {
-	case TCP_CLOSED:
-		return
 	case TCP_LISTEN:
+
+		if tcph.Flags()&Header.TCPFlagRst != 0 {
+			return
+		}
+
+		if tcph.Flags()&Header.TCPFlagAck != 0 {
+			ack := Header.TCPFields{}
+			ack.SeqNum = tcph.AckNumber()
+			ack.Flags |= Header.TCPFlagRst
+			sendAck(&ack)
+			return
+		}
+
 		if tcph.Flags()&Header.TCPFlagSyn == 0 {
 			return
 		}
 
 		//* update send and receive state
 		t.Send.iss = 0
-		t.Send.una = t.Send.iss
+		t.Send.una = uint64(t.Send.iss)
 		t.Send.nxt = t.Send.una + 1
 		t.Send.wnd = math.MaxUint16
 
-		t.Recv.irs = uint(tcph.SequenceNumber())
-		t.Recv.nxt = t.Recv.irs + 1
-		t.Recv.wnd = uint(tcph.WindowSize())
+		t.Recv.irs = uint32(tcph.SequenceNumber())
+		t.Recv.nxt = uint64(t.Recv.irs) + 1
+		t.Recv.wnd = uint32(tcph.WindowSize())
 
 		t.State = TCP_SYN_RCVD
 
@@ -294,11 +321,11 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 			return
 		}
 		t.Send.una += 1
-		t.Send.wnd = uint(tcph.WindowSize())
+		t.Send.wnd = uint32(tcph.WindowSize())
 
-		t.Recv.irs = uint(tcph.SequenceNumber())
-		t.Recv.nxt = t.Recv.irs + 1
-		t.Recv.wnd = uint(tcph.WindowSize())
+		t.Recv.irs = uint32(tcph.SequenceNumber())
+		t.Recv.nxt = unwrap(t.Recv.irs, t.Recv.irs, t.Recv.nxt) + 1
+		t.Recv.wnd = uint32(tcph.WindowSize())
 
 		t.State = TCP_ESTABLISHED
 		ack := Header.TCPFields{}
@@ -309,11 +336,11 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 		sendAck(&ack)
 
 	case TCP_SYN_RCVD:
-		if tcph.Flags()&Header.TCPFlagAck == 0 || tcph.AckNumber() != uint32(t.Recv.nxt) {
+		if tcph.Flags()&Header.TCPFlagAck == 0 {
 			return
 		}
 		t.Send.una += 1
-		t.Send.wnd = uint(tcph.WindowSize())
+		t.Send.wnd = uint32(tcph.WindowSize())
 
 		t.State = TCP_ESTABLISHED
 	case TCP_FIN_WAIT1:
