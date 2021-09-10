@@ -59,6 +59,9 @@ func send(ifce *water.Interface, frameRaw *ethernet.Frame, iph *Header.IPv4, tcp
 	ifce.Write(frame)
 
 }
+
+// * map should only store the address of an object
+
 func main() {
 	config := water.Config{
 		DeviceType: water.TAP,
@@ -69,7 +72,7 @@ func main() {
 		panic("error creating interface")
 	}
 	var frame ethernet.Frame
-	connections := make(map[TcpConnAddr]TcpConn)
+	connections := make(map[TcpConnAddr]*TcpConn)
 	listenings := make(map[uint16]struct{})
 	// * for debugging
 	listenings[80] = struct{}{}
@@ -110,7 +113,7 @@ func main() {
 					send(ifce, &frame, &iph, &tcph, &ack)
 				}
 			}
-			connections[addr] = TcpConn{Addr: addr}
+			connections[addr] = &TcpConn{Addr: addr}
 			conn = connections[addr]
 			conn.State = TCP_LISTEN
 		}

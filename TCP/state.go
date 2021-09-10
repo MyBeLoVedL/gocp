@@ -238,6 +238,7 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 	// 		return
 	// 	}
 	// }
+	// fmt.Printf("State %v\n", t.State)
 
 	sendAck := func(ack *Header.TCPFields) {
 		ack.SrcPort = tcph.DestinationPort()
@@ -312,7 +313,6 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 
 		//* construct ACK packet
 		ack := Header.TCPFields{}
-		// ack.Flags |= Header.TCPFlagRst
 		ack.Flags |= Header.TCPFlagAck
 		ack.Flags |= Header.TCPFlagSyn
 		ack.AckNum = uint32(t.Recv.nxt)
@@ -338,16 +338,72 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 		sendAck(&ack)
 
 	case TCP_SYN_RCVD:
+
 		if tcph.Flags()&Header.TCPFlagAck == 0 {
 			return
 		}
 		t.Send.una += 1
 		t.Send.wnd = uint32(tcph.WindowSize())
-
 		t.State = TCP_ESTABLISHED
+		// * after establishing connection , immediately terminate it.
+		// ack := Header.TCPFields{}
+		// ack.Flags |= Header.TCPFlagAck
+		// ack.Flags |= Header.TCPFlagFin
+		// ack.SeqNum = uint32(t.Send.nxt)
+		// ack.AckNum = uint32(t.Recv.nxt)
+		// t.Send.nxt += 1
+		// sendAck(&ack)
+		// t.State = TCP_FIN_WAIT1
+
+	case TCP_ESTABLISHED:
+		if tcph.Flags()&Header.TCPFlagFin != 0 {
+			t.Recv.nxt += 1
+			ack := Header.TCPFields{}
+			ack.Flags |= Header.TCPFlagAck
+			ack.SeqNum = uint32(t.Send.nxt)
+			ack.AckNum = uint32(t.Recv.nxt)
+			sendAck(&ack)
+			t.State = TCP_CLOSE_WAIT
+
+			fin := Header.TCPFields{}
+			fin.Flags |= Header.TCPFlagFin
+			fin.Flags |= Header.TCPFlagAck
+			fin.SeqNum = uint32(t.Send.nxt)
+			fin.AckNum = uint32(t.Recv.nxt)
+			sendAck(&fin)
+			t.Send.nxt += 1
+			t.State = TCP_LAST_ACK
+		}
+
 	case TCP_FIN_WAIT1:
+		if tcph.Flags()&Header.TCPFlagAck == 0 {
+			return
+		}
+		t.Send.una += 1
+		t.Send.wnd = uint32(tcph.WindowSize())
+		t.State = TCP_FIN_WAIT2
+
+	case TCP_FIN_WAIT2:
+		if tcph.Flags()&Header.TCPFlagFin == 0 {
+			return
+		}
+		t.Recv.nxt += 1
+		t.Recv.wnd = uint32(tcph.WindowSize())
+		ack := Header.TCPFields{}
+		ack.Flags |= Header.TCPFlagAck
+		ack.SeqNum = uint32(t.Send.nxt)
+		ack.AckNum = uint32(t.Recv.nxt)
+		sendAck(&ack)
+		t.State = TCP_TIME_WAIT
+
+	case TCP_LAST_ACK:
+		if tcph.Flags()&Header.TCPFlagAck == 0 {
+			return
+		}
+		t.State = TCP_CLOSED
 
 	default:
 		fmt.Printf("unknown state %v \n", t.State)
 	}
+	// fmt.Printf("State after %v\n", t.State)
 }
