@@ -8,6 +8,7 @@ commands = """
 	./tigo &
 	sudo ip addr add 192.168.0.1/24 dev tun0
  	sudo ip link set up dev tun0
+    sudo arp -s 192.168.0.2 ff:ff:ff:ff:ff:f1
 """
 
 

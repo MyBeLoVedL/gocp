@@ -225,17 +225,19 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 	// fmt.Printf("begin processing with state %v\n", t.State)
 
 	// ! check if seq is within the receive window
-	if !validateSegment(t, tcph) {
-		return
-	}
+	// if !validateSegment(t, tcph) {
+	// 	return
+	// }
+
+	// fmt.Printf("pass seg check\n")
 
 	// ! If this is an ACK packet,check if it ACK something valid , logically : una < ACK <= nxt
-	if tcph.Flags()&Header.TCPFlagAck != 0 {
-		ackno := unwrap(tcph.AckNumber(), t.Recv.irs, t.Recv.nxt)
-		if !(ackno > t.Send.una && ackno <= t.Send.una+t.Send.nxt) {
-			return
-		}
-	}
+	// if tcph.Flags()&Header.TCPFlagAck != 0 {
+	// 	ackno := unwrap(tcph.AckNumber(), t.Recv.irs, t.Recv.nxt)
+	// 	if !(ackno > t.Send.una && ackno <= t.Send.una+t.Send.nxt) {
+	// 		return
+	// 	}
+	// }
 
 	sendAck := func(ack *Header.TCPFields) {
 		ack.SrcPort = tcph.DestinationPort()
@@ -243,12 +245,11 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 		ack.DataOffset = Header.TCPMinimumSize
 		ack.WindowSize = uint16(t.Recv.wnd)
 		ack.Checksum = 0
-		ackRaw := Header.TCP(make([]byte, 26))
+		ackRaw := Header.TCP(make([]byte, 20))
 		ackRaw.Encode(ack)
 		// ! recheck the checksum
 		partialChecksum := Header.PseudoHeaderChecksum(Header.TCPProtocolNumber, iph.SourceAddress(), iph.DestinationAddress(), uint16(len(ackRaw)))
 		ackRaw.SetChecksum(^Header.Checksum(ackRaw, partialChecksum))
-
 		ackIP := Header.IPv4Fields{}
 		ackIP.SrcAddr = iph.DestinationAddress()
 
@@ -256,6 +257,7 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 		ackIP.Checksum = 0
 		ackIP.Protocol = uint8(Header.TCPProtocolNumber)
 		ackIP.TTL = 128
+		ackIP.ID = iph.ID() + 1
 		ackIP.TotalLength = uint16(20 + len(ackRaw))
 		ackIP.IHL = 20
 		ackIPRaw := Header.IPv4(make([]byte, 20))
@@ -263,8 +265,8 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 		ackIPRaw.SetChecksum(^(Header.Checksum(ackIPRaw, 0)))
 
 		frame := make([]byte, 14)
-		copy(frame[:6], frameRaw.Destination())
-		copy(frame[6:12], frameRaw.Source())
+		copy(frame[:6], frameRaw.Source())
+		copy(frame[6:12], frameRaw.Destination())
 		copy(frame[12:14], []byte{0x08, 0x00})
 
 		frame = append(frame, ackIPRaw...)
@@ -277,7 +279,6 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 	// ! Why 3-way handshake ?
 	// * 1 : exchange initial sequence number
 	// * 2 : prevent obselete connection
-	println("HI\n")
 	switch t.State {
 	case TCP_LISTEN:
 
@@ -311,6 +312,7 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 
 		//* construct ACK packet
 		ack := Header.TCPFields{}
+		// ack.Flags |= Header.TCPFlagRst
 		ack.Flags |= Header.TCPFlagAck
 		ack.Flags |= Header.TCPFlagSyn
 		ack.AckNum = uint32(t.Recv.nxt)
@@ -346,6 +348,6 @@ func (t *TcpConn) Process(ifce *water.Interface, frameRaw *ethernet.Frame, iph *
 	case TCP_FIN_WAIT1:
 
 	default:
-		fmt.Println("unknown state")
+		fmt.Printf("unknown state %v \n", t.State)
 	}
 }
